@@ -23,7 +23,6 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveUserPath } from "../infra/home-dir.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
 import { readSqliteUserVersion } from "../infra/sqlite-user-version.js";
-import { STARTUP_MIGRATION_HEARTBEAT_INTERVAL_MS } from "../infra/startup-migration-checkpoint.js";
 import { getMediaDir } from "../media/store-path.js";
 import { resolveRuntimeServiceBuildId, VERSION } from "../version.js";
 import { readRetainedAgentDeletionIds } from "./agent-deletion-journal.snapshot.worker.js";
@@ -68,6 +67,8 @@ import {
   validateShadow,
 } from "./state-upgrade-validate.js";
 
+/** How often a running upgrade touches its work directory, which restart health reads. */
+const UPGRADE_HEARTBEAT_INTERVAL_MS = 60_000;
 const UPGRADE_REPORT_SCOPE = "upgrade.report";
 const UPGRADE_PIN_SCOPE = "upgrade.pin";
 // Previous files are kept as `<name>.pre-<generation>`, named after the build that replaced
@@ -453,7 +454,7 @@ export async function upgradeStateDirectory(params: {
       } catch {
         // The swap removes the work directory; a missed beat only shortens the wait.
       }
-    }, STARTUP_MIGRATION_HEARTBEAT_INTERVAL_MS);
+    }, UPGRADE_HEARTBEAT_INTERVAL_MS);
     heartbeat.unref();
     params.log.info(
       `Upgrading state to ${VERSION}: ${outdated.map((t) => `${path.relative(stateDir, t.path)} v${t.version}`).join(", ")}`,
