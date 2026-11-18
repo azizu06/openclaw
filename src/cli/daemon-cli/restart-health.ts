@@ -18,6 +18,7 @@ import {
 } from "../../process/exec-result.js";
 import { resolveCommandProcessSignal } from "../../process/exec-spawn.js";
 import { isPidAlive } from "../../shared/pid-alive.js";
+import { readStateUpgradeActivity } from "../../state/state-upgrade-activity.js";
 import { sleep } from "../../utils.js";
 import {
   GatewayRestartDeadlineError,
@@ -57,6 +58,28 @@ export type { GatewayRestartSnapshot } from "./restart-health.types.js";
 export { terminateStaleGatewayPids } from "../../infra/restart-stale-pids.js";
 
 const STARTUP_MIGRATION_ACTIVITY_POLL_MS = 5_000;
+
+type StartupMigrationActivity = { owner: string; pid?: number; heartbeatAt: number | null };
+
+/**
+ * Doctor and current-state startup migrations hold the shared lease. A copy-and-swap
+ * upgrade at Gateway start owns no live database; its work directory is its heartbeat.
+ */
+function isStartupMigrationActive(params: {
+  env?: NodeJS.ProcessEnv;
+  onActivity?: (activity: StartupMigrationActivity) => void;
+}): boolean {
+  if (hasActiveStartupMigrationLease(params)) {
+    return true;
+  }
+  const upgrades = readStateUpgradeActivity(params.env ?? process.env).filter((upgrade) =>
+    isPidAlive(upgrade.pid),
+  );
+  for (const upgrade of upgrades) {
+    params.onActivity?.({ owner: "state-upgrade", ...upgrade });
+  }
+  return upgrades.length > 0;
+}
 const STOPPED_FREE_EARLY_EXIT_GRACE_MS = 10_000;
 const WINDOWS_STOPPED_FREE_EARLY_EXIT_GRACE_MS = 90_000;
 
@@ -104,7 +127,7 @@ type GatewayRestartWaitOptions = {
   /** Diagnostics can report absence immediately; start/restart callers wait for installation. */
   waitForMissingService?: boolean;
   supervisorKeepsAlive?: boolean;
-  isStartupMigrationActive?: typeof hasActiveStartupMigrationLease;
+  isStartupMigrationActive?: typeof isStartupMigrationActive;
   probeHosts?: readonly string[];
   probeContext?: GatewayRestartProbeContext;
   onProgress?: (phase: string) => void;
@@ -375,7 +398,7 @@ export async function waitForGatewayHealthyRestart(
           missingLegacyOwner = legacyOwner?.port !== params.port;
           // Lease release can precede Gateway ownership; keep observed startup for this wait.
           observedStartupMigration ||= await read("startup-migration", async () =>
-            (params.isStartupMigrationActive ?? hasActiveStartupMigrationLease)({
+            (params.isStartupMigrationActive ?? isStartupMigrationActive)({
               env: params.env,
             }),
           );
@@ -447,7 +470,7 @@ export async function waitForGatewayHealthyRestart(
         migrationActive = false;
       } else if (elapsedMs >= nextMigrationActivityPollMs) {
         try {
-          migrationActive = (params.isStartupMigrationActive ?? hasActiveStartupMigrationLease)({
+          migrationActive = (params.isStartupMigrationActive ?? isStartupMigrationActive)({
             env: params.env,
           });
         } catch {
